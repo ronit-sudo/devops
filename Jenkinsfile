@@ -2,93 +2,99 @@ pipeline {
     agent any
 
     environment {
-        IMAGE_NAME = "dockerrr049/myapp"
-        CONTAINER  = "myapp"
+        DOCKER_USER    = "dockerrr049"
+        IMAGE_REPO     = "myapp"
+        CONTAINER_NAME = "myapp"
+        KEEP_IMAGES    = 3
     }
 
     stages {
 
-        stage('Checkout') {
-            steps {
-                git 'https://github.com/ronit-sudo/devops.git'
-            }
-        }
-
-        stage('Build Image') {
+        stage('Build Docker Image') {
             steps {
                 sh '''
-                echo "Building: ${IMAGE_NAME}:build-${BUILD_NUMBER}"
-                docker build -t ${IMAGE_NAME}:build-${BUILD_NUMBER} .
-                '''
+echo "Building image ${DOCKER_USER}/${IMAGE_REPO}:${BUILD_NUMBER}"
+docker build -t ${DOCKER_USER}/${IMAGE_REPO}:${BUILD_NUMBER} .
+'''
             }
         }
 
-        stage('Push Image') {
+        stage('Docker Login') {
             steps {
-                withCredentials([usernamePassword(
-                    credentialsId: 'dockerhub-creds',
-                    usernameVariable: 'DOCKER_USER',
-                    passwordVariable: 'DOCKER_PASS'
-                )]) {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'dockerhub-creds',
+                        usernameVariable: 'DOCKER_LOGIN_USER',
+                        passwordVariable: 'DOCKER_LOGIN_PASS'
+                    )
+                ]) {
                     sh '''
-                    echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
-                    docker push ${IMAGE_NAME}:build-${BUILD_NUMBER}
-                    '''
+echo "$DOCKER_LOGIN_PASS" | docker login -u "$DOCKER_LOGIN_USER" --password-stdin
+'''
                 }
             }
         }
 
-        stage('Cleanup Old Tags (Keep last 3)') {
+        stage('Push Docker Image') {
             steps {
-                withCredentials([usernamePassword(
-                    credentialsId: 'dockerhub-creds',
-                    usernameVariable: 'DOCKER_USER',
-                    passwordVariable: 'DOCKER_PASS'
-                )]) {
-                    sh '''
-                    echo "======== CLEANUP STARTED ========"
-
-                    API_AUTH=$(echo -n "${DOCKER_USER}:${DOCKER_PASS}" | base64)
-
-                    echo "Fetching tags…"
-                    ALL=$(curl -s "https://hub.docker.com/v2/repositories/${IMAGE_NAME}/tags/?page_size=100" |
-                      jq -r '.results[] | select(.name | startswith("build-")) | (.name + " " + .digest)' |
-                      sort -Vr)
-
-                    echo "All build tags:"
-                    echo "$ALL"
-
-                    OLD=$(echo "$ALL" | tail -n +4 | awk '{print $2}')
-
-                    echo "Deleting manifests:"
-                    echo "$OLD"
-
-                    for digest in $OLD; do
-                        echo "Deleting manifest: $digest"
-                        curl -s -X DELETE \
-                          -H "Authorization: Basic ${API_AUTH}" \
-                          -H "Accept: application/vnd.docker.distribution.manifest.list.v2+json" \
-                          "https://hub.docker.com/v2/repositories/${IMAGE_NAME}/manifests/${digest}/"
-                    done
-
-                    echo "======== CLEANUP DONE ========"
-                    '''
-                }
+                sh '''
+docker push ${DOCKER_USER}/${IMAGE_REPO}:${BUILD_NUMBER}
+'''
             }
         }
 
         stage('Deploy Container') {
             steps {
                 sh '''
-                echo "Deploying latest build…"
+docker stop ${CONTAINER_NAME} || true
+docker rm ${CONTAINER_NAME} || true
 
-                docker rm -f ${CONTAINER} || true
-                docker run -d --name ${CONTAINER} -p 5050:2020 ${IMAGE_NAME}:build-${BUILD_NUMBER}
-
-                echo "Deployment complete."
-                '''
+docker run -d \
+    --name ${CONTAINER_NAME} \
+    -p 5050:2020 \
+    ${DOCKER_USER}/${IMAGE_REPO}:${BUILD_NUMBER}
+'''
             }
         }
 
+        stage('Cleanup Old DockerHub Tags (Keep Last 3)') {
+            steps {
+                withCredentials([
+                    string(credentialsId: 'dockerhub-token', variable: 'DOCKER_PAT')
+                ]) {
+                    sh '''
+echo "Generating Docker Hub JWT token..."
+
+JWT_RESPONSE=$(curl -s -X POST https://hub.docker.com/v2/users/login/ \
+  -H "Content-Type: application/json" \
+  -d "{
+        \\"username\\": \\"${DOCKER_USER}\\",
+        \\"password\\": \\"${DOCKER_PAT}\\"
+      }")
+
+JWT_TOKEN=$(echo "$JWT_RESPONSE" | jq -r .token)
+
+echo "JWT: $JWT_TOKEN"
+
+TAGS=$(curl -s -H "Authorization: Bearer $JWT_TOKEN" \
+https://hub.docker.com/v2/repositories/${DOCKER_USER}/${IMAGE_REPO}/tags/?page_size=100 \
+| jq -r '.results | sort_by(.last_updated) | reverse | .[].name')
+
+COUNT=0
+for TAG in $TAGS; do
+  COUNT=$((COUNT+1))
+  if [ $COUNT -gt $KEEP_IMAGES ]; then
+    echo "Deleting tag: $TAG"
+    curl -s -X DELETE \
+      -H "Authorization: Bearer $JWT_TOKEN" \
+      https://hub.docker.com/v2/repositories/${DOCKER_USER}/${IMAGE_REPO}/tags/$TAG/
+  else
+    echo "Keeping tag: $TAG"
+  fi
+done
+'''
+                }
+            }
+        }
     }
 }

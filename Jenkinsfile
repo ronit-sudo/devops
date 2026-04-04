@@ -46,25 +46,29 @@ pipeline {
                     passwordVariable: 'DOCKERHUB_PSW'
                 )]) {
                     sh '''
-                    echo "Identifying old tags..."
+                    echo "Cleaning older DockerHub tags and manifests..."
 
                     API_AUTH=$(echo -n "${DOCKERHUB_USR}:${DOCKERHUB_PSW}" | base64)
 
-                    ALL_TAGS=$(curl -s "https://hub.docker.com/v2/repositories/${IMAGE_NAME}/tags/?page_size=100" |
-                        jq -r '.results[].name' |
-                        grep build- |
+                    # Get all manifests with build-* tags
+                    ALL_MANIFESTS=$(curl -s "https://hub.docker.com/v2/repositories/${IMAGE_NAME}/tags/?page_size=100" |
+                        jq -r '.results[] | select(.name | startswith("build-")) | "\(.name) \(.digest)"' |
                         sort -Vr)
 
-                    OLD_TAGS=$(echo "$ALL_TAGS" | tail -n +4)
+                    echo "Found build tags:"
+                    echo "$ALL_MANIFESTS"
 
-                    echo "Tags to delete:"
-                    echo "$OLD_TAGS"
+                    # Keep last 3
+                    OLD_MANIFESTS=$(echo "$ALL_MANIFESTS" | tail -n +4 | awk '{print $2}')
 
-                    for tag in $OLD_TAGS; do
-                        echo "Deleting tag: $tag"
+                    echo "Deleting these manifests:"
+                    echo "$OLD_MANIFESTS"
+
+                    for digest in $OLD_MANIFESTS; do
+                        echo "Deleting manifest: $digest"
                         curl -s -X DELETE \
                           -H "Authorization: Basic ${API_AUTH}" \
-                          "https://hub.docker.com/v2/repositories/${IMAGE_NAME}/tags/${tag}/"
+                          "https://hub.docker.com/v2/repositories/${IMAGE_NAME}/manifests/${digest}/"
                     done
                     '''
                 }
@@ -74,10 +78,12 @@ pipeline {
         stage('Deploy Container') {
             steps {
                 sh '''
-                echo "Deploying container..."
+                echo "Deploying Container..."
 
                 docker rm -f ${CONTAINER} || true
                 docker run -d --name ${CONTAINER} -p 5000:5000 ${IMAGE_NAME}:build-${BUILD_NUMBER}
+
+                echo "Container deployed successfully."
                 '''
             }
         }

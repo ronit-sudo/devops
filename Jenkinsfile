@@ -45,20 +45,19 @@ pipeline {
                     usernameVariable: 'DOCKERHUB_USR',
                     passwordVariable: 'DOCKERHUB_PSW'
                 )]) {
+
                     sh '''
                     echo "Cleaning older DockerHub tags and manifests..."
 
                     API_AUTH=$(echo -n "${DOCKERHUB_USR}:${DOCKERHUB_PSW}" | base64)
 
-                    # Get all manifests with build-* tags
                     ALL_MANIFESTS=$(curl -s "https://hub.docker.com/v2/repositories/${IMAGE_NAME}/tags/?page_size=100" |
-                        jq -r '.results[] | select(.name | startswith("build-")) | "\(.name) \(.digest)"' |
+                        jq -r '.results[] | select(.name | startswith("build-")) | (.name + " " + .digest)' |
                         sort -Vr)
 
                     echo "Found build tags:"
                     echo "$ALL_MANIFESTS"
 
-                    # Keep last 3
                     OLD_MANIFESTS=$(echo "$ALL_MANIFESTS" | tail -n +4 | awk '{print $2}')
 
                     echo "Deleting these manifests:"
